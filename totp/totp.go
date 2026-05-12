@@ -17,8 +17,8 @@ type Manager struct {
 	issuer string
 }
 
-// New returns a TOTP manager for the given issuer.
-func New(
+// NewManager creates a TOTP manager for the issuer.
+func NewManager(
 	issuer string,
 	secret func(identity string) string,
 	store func(identity, secret string) error,
@@ -38,6 +38,7 @@ func New(
 	}, nil
 }
 
+// Enrollment creates enrollment data for an account.
 func (m *Manager) Enrollment(account string) (url string, qrpng []byte, err error) {
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      m.issuer,
@@ -69,6 +70,7 @@ func (m *Manager) Enrollment(account string) (url string, qrpng []byte, err erro
 	return key.URL(), buf.Bytes(), nil
 }
 
+// Verify checks a passcode for an identity.
 func (m *Manager) Verify(identity, passcode string) bool {
 	secret := m.secret(identity)
 	if secret == "" {
