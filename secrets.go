@@ -2,10 +2,7 @@
 package secrets
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha512"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -16,6 +13,7 @@ import (
 const (
 	ErrUnevenEntropyBits errStr = "uneven entropy bits"
 	ErrOTPLength         errStr = "otp length must be between 1 and 18"
+	ErrPepperRequired    errStr = "pepper required"
 )
 
 // RandBytes returns cryptographically secure random bytes.
@@ -74,37 +72,23 @@ func RandOTP(lengths ...int) (string, error) {
 	return fmt.Sprintf("%0*s", length, value.String()), nil
 }
 
-// Hash is pretty much an alias to bcrypt.GenerateFromPassword
-func Hash(password []byte, cost ...int) (hash []byte, err error) {
+// Hash hashes a password bound to an application-level pepper.
+func Hash(password, pepper []byte, cost ...int) ([]byte, error) {
+	if len(pepper) == 0 {
+		return nil, ErrPepperRequired
+	}
+
 	c := bcrypt.DefaultCost
 	if len(cost) > 0 {
 		c = cost[0]
 	}
-	return bcrypt.GenerateFromPassword(password, c)
+	return bcrypt.GenerateFromPassword(pepperPassword(password, pepper), c)
 }
 
-func Pepper(password, pepper []byte) []byte {
-	mac := hmac.New(sha512.New384, pepper)
-	mac.Write(password)
-
-	sum := mac.Sum(nil)
-
-	peppered := make([]byte, base64.RawStdEncoding.EncodedLen(len(sum)))
-	base64.RawStdEncoding.Encode(peppered, sum)
-
-	return peppered
-}
-
-func PepperAndHash(password, pepper []byte, cost ...int) ([]byte, error) {
-	peppered := Pepper(password, pepper)
-	return Hash(peppered, cost...)
-}
-
-// CompareHashAndPassword is pretty much an alias to
-// bcrypt.CompareHashAndPassword, with pepper functionality
-func CompareHashAndPassword(hashedPassword, password []byte, pepper ...[]byte) error {
-	if len(pepper) > 0 {
-		password = Pepper(password, pepper[0])
+// Compare compares a peppered password with a bcrypt hash.
+func Compare(hashedPassword, password, pepper []byte) error {
+	if len(pepper) == 0 {
+		return ErrPepperRequired
 	}
-	return bcrypt.CompareHashAndPassword(hashedPassword, password)
+	return bcrypt.CompareHashAndPassword(hashedPassword, pepperPassword(password, pepper))
 }
