@@ -39,7 +39,7 @@ func NewManager(
 }
 
 // Enrollment creates enrollment data for an account.
-func (m *Manager) Enrollment(account string) (url string, qrpng []byte, err error) {
+func (m *Manager) Enrollment(account string, imageSize ...int) (url string, qrpng []byte, err error) {
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      m.issuer,
 		AccountName: account,
@@ -57,7 +57,12 @@ func (m *Manager) Enrollment(account string) (url string, qrpng []byte, err erro
 		return "", nil, err
 	}
 
-	img, err := key.Image(200, 200)
+	if len(imageSize) == 0 {
+		return key.URL(), nil, nil
+	}
+
+	size := imageSize[0]
+	img, err := key.Image(size, size)
 	if err != nil {
 		return "", nil, err
 	}
