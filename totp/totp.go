@@ -53,25 +53,20 @@ func (m *Manager) Enrollment(account string, imageSize ...int) (url string, qrpn
 		return "", nil, err
 	}
 
+	var buf bytes.Buffer
+	if len(imageSize) > 0 {
+		size := imageSize[0]
+		img, err := key.Image(size, size)
+		if err != nil {
+			return "", nil, err
+		}
+		if err := png.Encode(&buf, img); err != nil {
+			return "", nil, err
+		}
+	}
 	if err := m.store(account, key.Secret()); err != nil {
 		return "", nil, err
 	}
-
-	if len(imageSize) == 0 {
-		return key.URL(), nil, nil
-	}
-
-	size := imageSize[0]
-	img, err := key.Image(size, size)
-	if err != nil {
-		return "", nil, err
-	}
-
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return "", nil, err
-	}
-
 	return key.URL(), buf.Bytes(), nil
 }
 

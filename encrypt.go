@@ -15,6 +15,8 @@ const (
 	ciphertextAEADAES256GCMRandomNonce = byte(1)
 	ciphertextHeaderSize               = 8
 
+	// Version 1 stores a 12-byte random nonce and a 16-byte GCM tag.
+	encryptOverhead = 12 + 16
 	encryptSaltSize = 32
 	encryptKeySize  = 32
 	scryptN         = 1 << 15
@@ -69,7 +71,7 @@ func Decrypt(ciphertext, password, aad []byte) ([]byte, error) {
 		return nil, errStr("aad required")
 	}
 
-	if len(ciphertext) < ciphertextHeaderSize+encryptSaltSize {
+	if len(ciphertext) < ciphertextHeaderSize+encryptSaltSize+encryptOverhead {
 		return nil, errStr("ciphertext too short")
 	}
 
@@ -96,10 +98,6 @@ func Decrypt(ciphertext, password, aad []byte) ([]byte, error) {
 	gcm, err := cipher.NewGCMWithRandomNonce(block)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(encrypted) < gcm.Overhead() {
-		return nil, errStr("ciphertext too short")
 	}
 
 	authData := encryptAAD(header, aad)
