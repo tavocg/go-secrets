@@ -39,6 +39,19 @@ ciphertext, err := secrets.Encrypt(
 plaintext, err := secrets.Decrypt(ciphertext, []byte("password"), []byte("record:42"))
 ```
 
+Encryption uses AES-256-GCM with a scrypt-derived key and a versioned `GSCT`
+envelope carrying a random salt and nonce. Application-provided associated
+data (AAD) is also authenticated. Both password and AAD must be nonempty.
+Version 1 ciphertexts retain their format and remain readable after upgrades
+to the shared cipher setup.
+
+Use `errors.Is` with `ErrAADRequired`, `ErrPasswordRequired`,
+`ErrCiphertextTooShort`, `ErrUnsupportedCiphertextFormat`, or
+`ErrAuthenticationFailed` to handle failures. Unsupported headers and inputs
+shorter than the envelope minimum are rejected before password derivation.
+A wrong password, wrong AAD, or modified encrypted payload returns
+`ErrAuthenticationFailed` without plaintext.
+
 ## TOTP Usage
 
 Import `github.com/tavocg/go-secrets/totp/v3`. Supply the five callbacks in

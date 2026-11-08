@@ -1,6 +1,8 @@
 package secrets
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha512"
 	"encoding/base64"
@@ -16,7 +18,7 @@ func (e errStr) Error() string {
 
 func deriveEncryptionKey(password, salt []byte) ([]byte, error) {
 	if len(password) == 0 {
-		return nil, errStr("password required")
+		return nil, ErrPasswordRequired
 	}
 
 	if len(salt) != encryptSaltSize {
@@ -24,6 +26,18 @@ func deriveEncryptionKey(password, salt []byte) ([]byte, error) {
 	}
 
 	return scrypt.Key(password, salt, scryptN, scryptR, scryptP, encryptKeySize)
+}
+
+func newEncryptionAEAD(password, salt []byte) (cipher.AEAD, error) {
+	key, err := deriveEncryptionKey(password, salt)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCMWithRandomNonce(block)
 }
 
 func pepperPassword(password, pepper []byte) []byte {

@@ -2,10 +2,16 @@ package secrets
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"io"
+)
+
+const (
+	ErrAADRequired                 errStr = "aad required"
+	ErrPasswordRequired            errStr = "password required"
+	ErrCiphertextTooShort          errStr = "ciphertext too short"
+	ErrUnsupportedCiphertextFormat errStr = "unsupported ciphertext format"
+	ErrAuthenticationFailed        errStr = "authentication failed"
 )
 
 const (
@@ -32,9 +38,11 @@ var ciphertextHeaderV1 = [ciphertextHeaderSize]byte{
 	0,
 }
 
+// Encrypt uses AES-256-GCM with a scrypt-derived key, a random salt, and a
+// random nonce. Both password and associated data must be nonempty.
 func Encrypt(plaintext, password, aad []byte) ([]byte, error) {
 	if len(aad) == 0 {
-		return nil, errStr("aad required")
+		return nil, ErrAADRequired
 	}
 
 	salt := make([]byte, encryptSaltSize)
@@ -42,17 +50,7 @@ func Encrypt(plaintext, password, aad []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	key, err := deriveEncryptionKey(password, salt)
-	if err != nil {
-		return nil, err
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	gcm, err := cipher.NewGCMWithRandomNonce(block)
+	gcm, err := newEncryptionAEAD(password, salt)
 	if err != nil {
 		return nil, err
 	}
@@ -66,18 +64,20 @@ func Encrypt(plaintext, password, aad []byte) ([]byte, error) {
 	return ciphertext, nil
 }
 
+// Decrypt authenticates and decrypts a versioned ciphertext. Authentication
+// failures return ErrAuthenticationFailed without plaintext.
 func Decrypt(ciphertext, password, aad []byte) ([]byte, error) {
 	if len(aad) == 0 {
-		return nil, errStr("aad required")
+		return nil, ErrAADRequired
 	}
 
 	if len(ciphertext) < ciphertextHeaderSize+encryptSaltSize+encryptOverhead {
-		return nil, errStr("ciphertext too short")
+		return nil, ErrCiphertextTooShort
 	}
 
 	header := ciphertext[:ciphertextHeaderSize]
 	if !bytes.Equal(header, ciphertextHeaderV1[:]) {
-		return nil, errStr("unsupported ciphertext format")
+		return nil, ErrUnsupportedCiphertextFormat
 	}
 
 	saltStart := ciphertextHeaderSize
@@ -85,17 +85,7 @@ func Decrypt(ciphertext, password, aad []byte) ([]byte, error) {
 	salt := ciphertext[saltStart:saltEnd]
 	encrypted := ciphertext[saltEnd:]
 
-	key, err := deriveEncryptionKey(password, salt)
-	if err != nil {
-		return nil, err
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	gcm, err := cipher.NewGCMWithRandomNonce(block)
+	gcm, err := newEncryptionAEAD(password, salt)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +93,7 @@ func Decrypt(ciphertext, password, aad []byte) ([]byte, error) {
 	authData := encryptAAD(header, aad)
 	plaintext, err := gcm.Open(nil, nil, encrypted, authData)
 	if err != nil {
-		return nil, errStr("authentication failed")
+		return nil, ErrAuthenticationFailed
 	}
 
 	return plaintext, nil
