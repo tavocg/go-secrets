@@ -33,6 +33,7 @@ func enrollment(t *testing.T, imageSize ...int) (string, []byte) {
 			stored[identity] = secret
 			return nil
 		},
+		func(string, string, uint64) bool { return false },
 	)
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)

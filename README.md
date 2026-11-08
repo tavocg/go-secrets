@@ -8,8 +8,8 @@ storing verification codes as keyed digests.
 
 - `github.com/tavocg/go-secrets`: random bytes, hex secrets, numeric OTPs,
   peppered bcrypt hashes, and authenticated encryption.
-- `github.com/tavocg/go-secrets/totp`: TOTP enrollment and verification backed by
-  caller-provided secret storage.
+- `github.com/tavocg/go-secrets/totp/v2`: TOTP enrollment and verification backed
+  by caller-provided secret storage and atomic counter consumption.
 - `github.com/tavocg/go-secrets/otp`: HMAC-SHA-256 digests for one-time codes,
   bound to purpose and identity.
 
@@ -17,7 +17,7 @@ storing verification codes as keyed digests.
 
 ```sh
 go get github.com/tavocg/go-secrets
-go get github.com/tavocg/go-secrets/totp
+go get github.com/tavocg/go-secrets/totp/v2
 go get github.com/tavocg/go-secrets/otp
 ```
 
@@ -41,20 +41,73 @@ plaintext, err := secrets.Decrypt(ciphertext, []byte("password"), []byte("record
 
 ## TOTP Usage
 
+Import `github.com/tavocg/go-secrets/totp/v2`. Version 2 requires a consumption
+callback in addition to the secret-loading and storage callbacks. `Verify`
+returns true only after the callback atomically accepts the matched counter.
+
+The following in-memory example illustrates the storage contract. Use durable,
+shared storage to preserve replay protection across restarts and instances.
+
 ```go
+var mu sync.Mutex
 store := map[string]string{}
+lastUsed := map[string]uint64{}
 
 manager, err := totp.NewManager(
 	"example-app",
 	func(identity string) string {
+		mu.Lock()
+		defer mu.Unlock()
 		return store[identity]
 	},
 	func(identity, secret string) error {
-		store[identity] = secret
+		mu.Lock()
+		defer mu.Unlock()
+		if store[identity] != secret {
+			store[identity] = secret
+			delete(lastUsed, identity)
+		}
 		return nil
+	},
+	func(identity, secret string, counter uint64) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if store[identity] != secret {
+			return false
+		}
+		if last, used := lastUsed[identity]; used && counter <= last {
+			return false
+		}
+		lastUsed[identity] = counter
+		return true
 	},
 )
 ```
+
+For a database implementation, use a conditional update and return true only
+when exactly one row changes. The placeholders below are illustrative; bind
+them using your driver's parameter syntax:
+
+```sql
+UPDATE totp_credentials
+SET last_counter = :counter
+WHERE identity = :identity AND secret = :secret
+  AND (last_counter IS NULL OR last_counter < :counter);
+```
+
+Keep the active secret and counter check in the same transaction or conditional
+write. Return false on storage errors, stale secrets, or reused/older counters;
+reset the counter only when replacing the credential. Every manager must use
+the same storage. The callback receives a 30-second counter, not a timestamp,
+and must not log the secret. `Verify` preserves six-digit SHA-1 codes and one
+interval of clock skew in either direction. Throttle verification attempts in
+the application.
+
+When migrating from v1, change the import path, add nullable `last_counter` to
+your credential storage, supply the fourth constructor argument, and stop old
+verifiers that do not consume counters. Previously accepted codes cannot be
+reconstructed from v1 storage; let the old validation window expire before
+accepting requests on v2.
 
 Enrollment always returns an `otpauth://` URL and stores the generated secret.
 By default it does not render a QR image:
