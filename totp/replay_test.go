@@ -12,14 +12,22 @@ import (
 const testSecret = "JBSWY3DPEHPK3PXP"
 
 type testCredential struct {
-	secret string
-	last   uint64
-	used   bool
+	secret  string
+	last    uint64
+	used    bool
+	version uint64
+}
+
+type testPending struct {
+	secret    string
+	expiresAt time.Time
+	version   uint64
 }
 
 type testStore struct {
-	mu   sync.Mutex
-	data map[string]testCredential
+	mu      sync.Mutex
+	data    map[string]testCredential
+	pending map[string]testPending
 }
 
 func (s *testStore) secret(identity string) string {
@@ -32,7 +40,7 @@ func (s *testStore) store(identity, secret string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.data[identity].secret != secret {
-		s.data[identity] = testCredential{secret: secret}
+		s.data[identity] = testCredential{secret: secret, version: s.data[identity].version + 1}
 	}
 	return nil
 }
@@ -49,9 +57,43 @@ func (s *testStore) consume(identity, secret string, counter uint64) bool {
 	return true
 }
 
+func (s *testStore) loadPending(identity string) (string, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending[identity]
+	return p.secret, p.expiresAt
+}
+
+func (s *testStore) storePending(identity, secret string, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		s.pending = make(map[string]testPending)
+	}
+	s.pending[identity] = testPending{secret, expiresAt, s.data[identity].version}
+	return nil
+}
+
+func (s *testStore) activate(identity, secret string, counter uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending[identity]
+	current := s.data[identity]
+	if p.secret != secret || !time.Now().Before(p.expiresAt) || p.version != current.version {
+		return false
+	}
+	s.data[identity] = testCredential{secret: secret, last: counter, used: true, version: current.version + 1}
+	delete(s.pending, identity)
+	return true
+}
+
+func (s *testStore) callbacks() Storage {
+	return Storage{Secret: s.secret, Consume: s.consume, Pending: s.loadPending, StorePending: s.storePending, Activate: s.activate}
+}
+
 func newTestManager(t *testing.T, s *testStore) *Manager {
 	t.Helper()
-	m, err := NewManager("example", s.secret, s.store, s.consume)
+	m, err := NewManager("example", s.callbacks())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,15 +193,13 @@ func TestVerifyFailsClosed(t *testing.T) {
 	now := time.Unix(1800000015, 0)
 	code := codeAt(t, testSecret, now)
 	calls := 0
-	m, err := NewManager("example", func(identity string) string {
-		if identity == "alice" {
-			return testSecret
-		}
-		return ""
-	}, func(string, string) error { return nil }, func(string, string, uint64) bool {
+	s := &testStore{data: map[string]testCredential{"alice": {secret: testSecret}}}
+	storage := s.callbacks()
+	storage.Consume = func(string, string, uint64) bool {
 		calls++
 		return false
-	})
+	}
+	m, err := NewManager("example", storage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,11 +217,13 @@ func TestVerifyFailsClosed(t *testing.T) {
 func TestVerifyRejectsSecretChangedBeforeConsumption(t *testing.T) {
 	s := &testStore{data: map[string]testCredential{"alice": {secret: testSecret}}}
 	const replacement = "KRSXG5DSNFXGOIDB"
-	m, err := NewManager("example", func(identity string) string {
+	storage := s.callbacks()
+	storage.Secret = func(identity string) string {
 		old := s.secret(identity)
 		s.store(identity, replacement)
 		return old
-	}, s.store, s.consume)
+	}
+	m, err := NewManager("example", storage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,21 +237,23 @@ func TestVerifyRejectsSecretChangedBeforeConsumption(t *testing.T) {
 }
 
 func TestNewManagerRequiresCallbacks(t *testing.T) {
-	secret := func(string) string { return testSecret }
-	store := func(string, string) error { return nil }
-	consume := func(string, string, uint64) bool { return false }
-	for _, missing := range []string{"secret", "store", "consume"} {
+	s := &testStore{data: map[string]testCredential{}}
+	for _, missing := range []string{"secret", "consume", "pending", "storePending", "activate"} {
 		t.Run(missing, func(t *testing.T) {
-			load, save, use := secret, store, ConsumeFunc(consume)
+			storage := s.callbacks()
 			switch missing {
 			case "secret":
-				load = nil
-			case "store":
-				save = nil
+				storage.Secret = nil
 			case "consume":
-				use = nil
+				storage.Consume = nil
+			case "pending":
+				storage.Pending = nil
+			case "storePending":
+				storage.StorePending = nil
+			case "activate":
+				storage.Activate = nil
 			}
-			if _, err := NewManager("example", load, save, use); err == nil {
+			if _, err := NewManager("example", storage); err == nil {
 				t.Fatal("nil callback accepted")
 			}
 		})

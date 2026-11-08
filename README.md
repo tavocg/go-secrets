@@ -8,7 +8,7 @@ storing verification codes as keyed digests.
 
 - `github.com/tavocg/go-secrets`: random bytes, hex secrets, numeric OTPs,
   peppered bcrypt hashes, and authenticated encryption.
-- `github.com/tavocg/go-secrets/totp/v2`: TOTP enrollment and verification backed
+- `github.com/tavocg/go-secrets/totp/v3`: TOTP enrollment and verification backed
   by caller-provided secret storage and atomic counter consumption.
 - `github.com/tavocg/go-secrets/otp`: HMAC-SHA-256 digests for one-time codes,
   bound to purpose and identity.
@@ -17,7 +17,7 @@ storing verification codes as keyed digests.
 
 ```sh
 go get github.com/tavocg/go-secrets
-go get github.com/tavocg/go-secrets/totp/v2
+go get github.com/tavocg/go-secrets/totp/v3
 go get github.com/tavocg/go-secrets/otp
 ```
 
@@ -41,52 +41,67 @@ plaintext, err := secrets.Decrypt(ciphertext, []byte("password"), []byte("record
 
 ## TOTP Usage
 
-Import `github.com/tavocg/go-secrets/totp/v2`. Version 2 requires a consumption
-callback in addition to the secret-loading and storage callbacks. `Verify`
-returns true only after the callback atomically accepts the matched counter.
-
-The following in-memory example illustrates the storage contract. Use durable,
-shared storage to preserve replay protection across restarts and instances.
+Import `github.com/tavocg/go-secrets/totp/v3`. Supply the five callbacks in
+`totp.Storage` from your application's credential storage adapter. The method
+names below are illustrative; their signatures are defined in
+[`totp/storage.go`](totp/storage.go).
 
 ```go
-var mu sync.Mutex
-store := map[string]string{}
-lastUsed := map[string]uint64{}
-
-manager, err := totp.NewManager(
-	"example-app",
-	func(identity string) string {
-		mu.Lock()
-		defer mu.Unlock()
-		return store[identity]
-	},
-	func(identity, secret string) error {
-		mu.Lock()
-		defer mu.Unlock()
-		if store[identity] != secret {
-			store[identity] = secret
-			delete(lastUsed, identity)
-		}
-		return nil
-	},
-	func(identity, secret string, counter uint64) bool {
-		mu.Lock()
-		defer mu.Unlock()
-		if store[identity] != secret {
-			return false
-		}
-		if last, used := lastUsed[identity]; used && counter <= last {
-			return false
-		}
-		lastUsed[identity] = counter
-		return true
-	},
-)
+manager, err := totp.NewManager("example-app", totp.Storage{
+    Secret:       credentials.LoadActiveSecret,
+    Consume:      credentials.ConsumeCounter,
+    Pending:      credentials.LoadPending,
+    StorePending: credentials.SavePending,
+    Activate:     credentials.ActivatePending,
+})
 ```
 
-For a database implementation, use a conditional update and return true only
-when exactly one row changes. The placeholders below are illustrative; bind
-them using your driver's parameter syntax:
+Use durable, shared storage for active credentials, consumed counters, and
+pending enrollments. Every verifier must use the same storage. Callbacks must
+be safe for concurrent calls and fail closed on storage errors.
+
+Enrollment returns an `otpauth://` URL and saves a pending secret with a
+five-minute expiration. It leaves the active secret and its consumed counter
+unchanged. By default no QR image is rendered; pass a size to obtain a square
+PNG:
+
+```go
+url, qrpng, err := manager.Enrollment("alice@example.com") // qrpng == nil
+url, qrpng, err = manager.Enrollment("alice@example.com", 512)
+```
+
+After the user scans the QR code, confirm a code from that authenticator:
+
+```go
+ok := manager.ConfirmEnrollment("alice@example.com", passcode)
+```
+
+Confirmation loads the pending secret from storage for that identity. It does
+not accept an enrollment secret from the client. `Activate` must perform all
+of the following in one transaction or equivalent conditional write:
+
+1. Check that the pending secret still matches, has not expired, and belongs
+   to the current active credential generation (including the initial state
+   with no active credential).
+2. Replace the active secret and store the matched counter as already consumed.
+3. Delete the pending enrollment and return true only after commit.
+
+A concurrent confirmation has only one winner. Replacing a pending enrollment
+invalidates older confirmations; changing the active credential also
+invalidates pending enrollments created for its previous generation. Failed
+confirmation attempts must leave the active credential unchanged and must not
+extend the pending expiration. Clean up expired pending records in storage.
+
+Normal verification reads only the active secret and consumes its counter:
+
+```go
+ok := manager.Verify("alice@example.com", passcode)
+```
+
+The confirmation code is already consumed when `ConfirmEnrollment` succeeds.
+`Consume` must atomically check that the loaded secret is still active and
+advance its last accepted counter only when the new counter is higher. For
+example, using your driver's parameter syntax:
 
 ```sql
 UPDATE totp_credentials
@@ -95,39 +110,25 @@ WHERE identity = :identity AND secret = :secret
   AND (last_counter IS NULL OR last_counter < :counter);
 ```
 
-Keep the active secret and counter check in the same transaction or conditional
-write. Return false on storage errors, stale secrets, or reused/older counters;
-reset the counter only when replacing the credential. Every manager must use
-the same storage. The callback receives a 30-second counter, not a timestamp,
-and must not log the secret. `Verify` preserves six-digit SHA-1 codes and one
-interval of clock skew in either direction. Throttle verification attempts in
-the application.
+Return true only when one row changes and the write commits. Both verification
+and confirmation retain six-digit SHA-1 codes and one 30-second interval of
+clock skew in either direction. Use authenticated, recently reauthenticated
+account identities for enrollment changes, throttle confirmation and
+verification attempts, and avoid logging secrets or provisioning URLs.
 
-When migrating from v1, change the import path, add nullable `last_counter` to
-your credential storage, supply the fourth constructor argument, and stop old
-verifiers that do not consume counters. Previously accepted codes cannot be
-reconstructed from v1 storage; let the old validation window expire before
-accepting requests on v2.
+### Migrating from v2
 
-Enrollment always returns an `otpauth://` URL and stores the generated secret.
-By default it does not render a QR image:
+Change the import path to `/v3` and construct `totp.Storage` with the existing
+secret-loading and consumption callbacks plus the three enrollment callbacks.
+Replace the old active-secret storage callback with separate pending storage
+and atomic activation. Add pending-secret, expiration, and credential-generation
+storage; preserve existing active secrets and last accepted counters. Stop old
+writers before enabling the new flow. An in-memory reference implementation of
+the storage contract is in [`totp/replay_test.go`](totp/replay_test.go).
 
-```go
-url, qrpng, err := manager.Enrollment("alice@example.com")
-// qrpng == nil
-```
-
-Pass an image size to render a square PNG QR code:
-
-```go
-url, qrpng, err := manager.Enrollment("alice@example.com", 512)
-```
-
-Verify passcodes against the stored secret:
-
-```go
-ok := manager.Verify("alice@example.com", "123456")
-```
+When migrating from v1, also persist the last accepted counter. Old acceptance
+history is unavailable: let the old validation window expire before serving
+requests through the new verifier.
 
 ## OTP Usage
 

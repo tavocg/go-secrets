@@ -23,21 +23,7 @@ func TestEnrollmentAllowsQRCodeSizeOverride(t *testing.T) {
 func enrollment(t *testing.T, imageSize ...int) (string, []byte) {
 	t.Helper()
 
-	stored := map[string]string{}
-	manager, err := NewManager(
-		"go-secrets",
-		func(identity string) string {
-			return stored[identity]
-		},
-		func(identity, secret string) error {
-			stored[identity] = secret
-			return nil
-		},
-		func(string, string, uint64) bool { return false },
-	)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
+	manager := newTestManager(t, &testStore{data: map[string]testCredential{}})
 
 	url, qrpng, err := manager.Enrollment("example@example.com", imageSize...)
 	if err != nil {

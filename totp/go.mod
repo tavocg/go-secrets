@@ -1,4 +1,4 @@
-module github.com/tavocg/go-secrets/totp/v2
+module github.com/tavocg/go-secrets/totp/v3
 
 go 1.26.3
 

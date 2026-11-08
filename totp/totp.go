@@ -7,52 +7,41 @@ import (
 	"time"
 
 	"github.com/pquerna/otp"
-	"github.com/pquerna/otp/hotp"
 	"github.com/pquerna/otp/totp"
 )
 
-// ConsumeFunc returns true only after atomically checking that secret is still
-// active for identity and counter exceeds its last accepted counter, then
-// recording counter. Return false on replay, secret changes, or storage failure.
-// Persist this state with the credential and share it across all verifiers.
-type ConsumeFunc func(identity, secret string, counter uint64) bool
-
-// Manager wires TOTP enrollment and verification to caller-provided secret
-// loading, storage, and atomic consumption callbacks.
+// Manager wires TOTP enrollment and verification to caller-provided storage.
 type Manager struct {
-	secret  func(identity string) string
-	store   func(identity, secret string) error
-	consume ConsumeFunc
+	storage Storage
 	issuer  string
 }
 
 // NewManager creates a TOTP manager for the issuer.
-func NewManager(
-	issuer string,
-	secret func(identity string) string,
-	store func(identity, secret string) error,
-	consume ConsumeFunc,
-) (*Manager, error) {
-	if secret == nil {
+func NewManager(issuer string, storage Storage) (*Manager, error) {
+	if storage.Secret == nil {
 		return nil, errStr("nil secret callback")
 	}
-
-	if store == nil {
-		return nil, errStr("nil store callback")
-	}
-	if consume == nil {
+	if storage.Consume == nil {
 		return nil, errStr("nil consume callback")
+	}
+	if storage.Pending == nil {
+		return nil, errStr("nil pending callback")
+	}
+	if storage.StorePending == nil {
+		return nil, errStr("nil store pending callback")
+	}
+	if storage.Activate == nil {
+		return nil, errStr("nil activate callback")
 	}
 
 	return &Manager{
-		secret:  secret,
-		store:   store,
-		consume: consume,
+		storage: storage,
 		issuer:  issuer,
 	}, nil
 }
 
-// Enrollment creates enrollment data for an account.
+// Enrollment creates pending enrollment data valid for five minutes. It leaves
+// the active credential unchanged until ConfirmEnrollment succeeds.
 func (m *Manager) Enrollment(account string, imageSize ...int) (url string, qrpng []byte, err error) {
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      m.issuer,
@@ -78,7 +67,7 @@ func (m *Manager) Enrollment(account string, imageSize ...int) (url string, qrpn
 			return "", nil, err
 		}
 	}
-	if err := m.store(account, key.Secret()); err != nil {
+	if err := m.storage.StorePending(account, key.Secret(), time.Now().Add(5*time.Minute)); err != nil {
 		return "", nil, err
 	}
 	return key.URL(), buf.Bytes(), nil
@@ -91,28 +80,28 @@ func (m *Manager) Verify(identity, passcode string) bool {
 }
 
 func (m *Manager) verifyAt(identity, passcode string, now time.Time) bool {
-	if identity == "" || now.Unix() < 0 {
+	if identity == "" {
 		return false
 	}
-	secret := m.secret(identity)
-	if secret == "" {
-		return false
-	}
+	secret := m.storage.Secret(identity)
+	counter, valid := matchingCounter(passcode, secret, now)
+	return valid && m.storage.Consume(identity, secret, counter)
+}
 
-	current := now.Unix() / 30
-	// Consume the newest matching counter once; never try another interval
-	// after storage rejects a match.
-	for counter := current + 1; counter >= 0 && counter >= current-1; counter-- {
-		valid, err := hotp.ValidateCustom(passcode, uint64(counter), secret, hotp.ValidateOpts{
-			Digits:    otp.DigitsSix,
-			Algorithm: otp.AlgorithmSHA1,
-		})
-		if err != nil {
-			return false
-		}
-		if valid {
-			return m.consume(identity, secret, uint64(counter))
-		}
+// ConfirmEnrollment validates a pending enrollment's code and atomically
+// activates the credential with that code already consumed.
+func (m *Manager) ConfirmEnrollment(identity, passcode string) bool {
+	return m.confirmAt(identity, passcode, time.Now())
+}
+
+func (m *Manager) confirmAt(identity, passcode string, now time.Time) bool {
+	if identity == "" {
+		return false
 	}
-	return false
+	secret, expiresAt := m.storage.Pending(identity)
+	if !now.Before(expiresAt) {
+		return false
+	}
+	counter, valid := matchingCounter(passcode, secret, now)
+	return valid && m.storage.Activate(identity, secret, counter)
 }
